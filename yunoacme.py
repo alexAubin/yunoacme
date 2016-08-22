@@ -144,7 +144,7 @@ def init() :
         
     if not os.path.exists(confFolder):
     
-        print("Initial configuration and folders not there yet, creating them ...")
+        print("Initial configuration and folders not there yet, creating them...")
         
         rootId      = pwd.getpwnam("root").pw_uid
         metronomeId = grp.getgrnam("metronome").gr_gid
@@ -163,7 +163,7 @@ def init() :
 
 def getStatus(domain) :
 
-    logger.debug("Checking status of certificate for domain "+domain+" ...")
+    logger.debug("Checking status of certificate for domain "+domain+"...")
     
     certFile = yunohostCertsFolder+"/"+domain+"/crt.pem"
     cert = crypto.load_certificate(crypto.FILETYPE_PEM, open(certFile).read())
@@ -204,17 +204,17 @@ def install(domain) :
     statusSummary = status[1]
     issuer        = status[2]
     if (statusSummary == "GOOD") or (issuer.startswith("Let's Encrypt")) :
-        raise Exception("This domain seems to already have a valid Let's Encrypt certificate ?")
+        raise Exception("This domain seems to already have a valid Let's Encrypt certificate?")
     
     logger.info("Configuring Nginx and SSOWat for ACME challenge on "+domain+" ...")
     configureNginxAndSsowatForAcmeChallenge(domain)
 
     addKey(domain)
 
-    logger.info("Prepare certificate signing request (CSR) for "+domain+" ...")
+    logger.info("Prepare certificate signing request (CSR) for "+domain+"...")
     prepareCertificateSigningRequest(domain)
 
-    logger.info("Now asking ACME Tiny to fetch the certificate ...")
+    logger.info("Now asking ACME Tiny to fetch the certificate...")
 
     accountKeyFile = confFolder+"/keys/account.pem"
     # FIXME remove if not needed later
@@ -388,7 +388,7 @@ def checkNginxConfiguration() :
     process.wait()
 
     if (process.returncode != 0) :
-        raise Exception("This program seems to have broke the nginx configuration ! Sorry about that :(. Check the output of 'nginx -t' command.")
+        raise Exception("This program seems to have broken the nginx configuration! Sorry about that. :( Check the output of the 'nginx -t' command.")
         return False
     else :
         return True
@@ -421,7 +421,7 @@ def validateDomain(domain) :
 
     # Check domain is configured in yunohost ?
     if (domain not in getNginxDomainsList()) :
-        raise Exception("Domain "+domain+" is not configured in your yunohost installation !")
+        raise Exception("Domain "+domain+" is not configured in your yunohost installation!")
 
     # Check it's possible to access domain on port 80 ?
     try :
@@ -432,7 +432,7 @@ def validateDomain(domain) :
 
     except Exception:
 
-        raise Exception("It seems that domain "+domain+" cannot be accessed on port 80 ? Please check your configuration.")
+        raise Exception("It seems that domain "+domain+" cannot be accessed on port 80? Please check your configuration.")
         return False
  
 ###############################################################################
