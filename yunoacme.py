@@ -1,12 +1,12 @@
 #!/usr/bin/python2.7
 # -*- coding: utf-8 -*-
 
-import os, pwd, grp, logging, requests, glob, subprocess
+import os, pwd, grp, logging, requests, glob, subprocess, shutil
 from datetime import datetime
 from OpenSSL  import crypto
 from optparse import OptionParser
 from tabulate import tabulate
-from lib.acme_tiny.acme_tiny import get_crt as fetchCertificate
+from lib.acme_tiny.acme_tiny import get_crt as signCertificate
 
 ###############################################################################
 #   Misc definitions                                                          #
@@ -20,6 +20,7 @@ confFolder          = "/etc/yunoacme/"
 
 # Where we keep temporary files, and the webroot used to verify the domain when signing the certs
 tmpFolder           = "/tmp/yunoacme/"
+webrootFolder       = "/tmp/yunoacme-challenge/"
 
 # The validity limit, in days, after which we should be renewing certs
 validityLimit       = 15
@@ -149,13 +150,13 @@ def init() :
         rootId      = pwd.getpwnam("root").pw_uid
         metronomeId = grp.getgrnam("metronome").gr_gid
         
-        makeDir(confFolder,           "root", "root",      0640);
-        makeDir(confFolder+"/certs/", "root", "metronome", 0640);
-        makeDir(confFolder+"/keys/",  "root", "root",      0640);
-        makeDir(confFolder+"/live/",  "root", "metronome", 0640);
-        makeDir(confFolder+"/logs/",  "root", "root",      0640);
+        makeDir(confFolder,           "root", "root",      0655);
+        makeDir(confFolder+"/certs/", "root", "metronome", 0650);
+        makeDir(confFolder+"/keys/",  "root", "root",      0600);
+        makeDir(confFolder+"/live/",  "root", "metronome", 0650);
+        makeDir(confFolder+"/logs/",  "root", "root",      0600);
 
-        addKey("account")
+        addKey("account", confFolder+"/keys/")
         
         print("OK.")
 
@@ -163,8 +164,6 @@ def init() :
 
 def getStatus(domain) :
 
-    logger.debug("Checking status of certificate for domain "+domain+"...")
-    
     certFile = yunohostCertsFolder+"/"+domain+"/crt.pem"
     cert = crypto.load_certificate(crypto.FILETYPE_PEM, open(certFile).read())
     issuedBy = cert.get_issuer().CN
@@ -189,47 +188,122 @@ def getStatus(domain) :
     
     returnValue = [ domain, statusSummary, issuedBy, daysRemaining ]
 
-    logger.debug(returnValue)
-
     return returnValue
 
 ###############################################################################
 
 def install(domain) :
 
-    # Check that it makes sense to install a LE cert on this domain 
+    # Check that it makes sense to install a LE cert on this domain
+
     validateDomain(domain)
 
     status        = getStatus(domain)
     statusSummary = status[1]
     issuer        = status[2]
-    if (statusSummary == "GOOD") or (issuer.startswith("Let's Encrypt")) :
+    if (issuer.startswith("Let's Encrypt")) :
         raise Exception("This domain seems to already have a valid Let's Encrypt certificate?")
-    
+
+    # Backup existing certificate
+
+    logger.info("Backuping existing certificate in "+confFolder+"/certs/")
+
+    dateTag = datetime.now().strftime("%Y%m%d.%H%M%S")
+    backupFolder = confFolder+"/certs/"+domain+"."+dateTag+"-backupPreviousCertificate"
+    shutil.copytree(yunohostCertsFolder+"/"+domain, backupFolder)
+
+    # Configure nginx and ssowat for acme challenge
+
     logger.info("Configuring Nginx and SSOWat for ACME challenge on "+domain+" ...")
+    
     configureNginxAndSsowatForAcmeChallenge(domain)
 
-    addKey(domain)
+    fetchAndEnableNewCertificate(domain)
 
-    logger.info("Prepare certificate signing request (CSR) for "+domain+"...")
-    prepareCertificateSigningRequest(domain)
+###############################################################################
 
-    logger.info("Now asking ACME Tiny to fetch the certificate...")
+def fetchAndEnableNewCertificate(domain) :
+
+
+    logger.info("Making sure tmp folders exists...")
+
+    makeDir(webrootFolder, "root", "www-data", 0650);
+    makeDir(tmpFolder,     "root", "root",     0640);
+
+
+
+    logger.info("Prepare key and certificate signing request (CSR) for "+domain+"...")
+    
+    addKey(domain, tmpFolder)
+    domainKeyFile = tmpFolder+"/"+domain+".pem"
+    
+    prepareCertificateSigningRequest(domain, domainKeyFile, tmpFolder)
+
+
+
+    logger.info("Now using ACME Tiny to sign the certificate...")
 
     accountKeyFile = confFolder+"/keys/account.pem"
-    # FIXME remove if not needed later
-    #domainKeyFile  = confFolder+"/keys/"+domain+".pem"
     domainCsrFile  = tmpFolder+"/"+domain+".csr"
 
-    signedCertificate = fetchCertificate(accountKeyFile, domainCsrFile, tmpFolder, log=logger)
-    print signedCertificate
-    
+    signedCertificate = signCertificate(accountKeyFile, domainCsrFile, webrootFolder, log=logger)
     LEintermediateCertificate = requests.get("https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem").text
-    print LEintermediateCertificate
 
-    with open("./tmp", "w") as f :
+
+
+    logger.info("Saving the key and signed certificate...")    
+   
+    # Create corresponding directory
+    dateTag = datetime.now().strftime("%Y%m%d.%H%M%S")
+    newCertFolder = confFolder + "/certs/" + domain + "." + dateTag 
+    makeDir(newCertFolder,     "root", "root",     0655);
+  
+    # Move the private key
+    shutil.move(domainKeyFile, newCertFolder+"/key.pem")
+   
+    # Write the cert
+    with open(newCertFolder+"/crt.pem", "w") as f :
         f.write(signedCertificate)
         f.write(LEintermediateCertificate)
+    
+
+
+    logger.info("Enabling the new certificate...")
+
+    # Replace (if necessary) the link in live folder
+    liveLink = confFolder+"/live/"+domain
+
+    if os.path.lexists(liveLink) :
+        os.remove(liveLink)
+
+    os.symlink(newCertFolder, liveLink)
+
+    # Check the path in yunohost cert folder points to something in the yunoacme conf folder
+    yunohostCertFolderDomain = yunohostCertsFolder+"/"+domain
+    if not (os.path.realpath(yunohostCertFolderDomain).startswith(confFolder)) :
+        
+        # If not, we delete it (should have been backuped during install())
+        # and make it point to the live folder
+        shutil.rmtree(yunohostCertFolderDomain) 
+    
+        os.symlink(liveLink, yunohostCertFolderDomain)
+
+    # Check the statusof the certificate is now "GOOD"
+    status        = getStatus(domain)
+    statusSummary = status[1]
+    if (statusSummary != "GOOD") :
+        raise Exception("Sounds like enabling the new certificate for "+domain+" failed somehow... (status is not 'GOOD') ='(")
+
+
+
+    logging.info("Restarting services...")
+
+    for s in [ "nginx", "postfix", "dovecot", "metronome" ] :
+
+        service(s, "restart")
+
+        
+
 
 ###############################################################################
 #   Misc tools                                                                #
@@ -247,7 +321,7 @@ def configureNginxAndSsowatForAcmeChallenge(domain) :
 location '/.well-known/acme-challenge' 
 {
         default_type "text/plain";
-        alias        '''+tmpFolder+''';
+        alias        '''+webrootFolder+''';
 }
     '''
 
@@ -259,7 +333,7 @@ location '/.well-known/acme-challenge'
     # Write the conf
     if os.path.exists(nginxConfFile) :
         
-        logger.info("Nginx configuration file for Let's encrypt / Acme challenge already exists, skipping.")
+        logger.info("Nginx configuration file for ACME challenge already exists for domain, skipping.")
        
     else :
         
@@ -269,16 +343,14 @@ location '/.well-known/acme-challenge'
         
         # Check conf is okay and reload nginx if it is
         if (checkNginxConfiguration()) :
-            command = "systemctl reload nginx"
-            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
-            process.wait()
+            service("nginx","reload")
         
     # SSOwat part
     # -----------
 
         # Get current unprotected regex for the domain
 
-    command = "yunohost app setting letsencrypt unprotected_regex"
+    command = "sudo yunohost app setting letsencrypt unprotected_regex"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
     process.wait()
     regexList, err = process.communicate()
@@ -289,37 +361,26 @@ location '/.well-known/acme-challenge'
     
     if regex in regexList :
     
-        logger.info("Let's encrypt / Acme challenge SSOWat configartion already in place, skipping.")
+        logger.info("Let's encrypt / Acme challenge SSOWat configuration already in place, skipping.")
     
     else :
-        logger.info("Adding SSOWat configuration for Let's encrpt / Acme challenge for domain " + domain + ".")
+        logger.info("Adding SSOWat configuration for Let's encrypt / ACME challenge for domain " + domain + ".")
 
         regexList += ","+regex
         
-        command = "yunohost app setting letsencrypt unprotected_regex -v \""+regexList+"\""
+        command = "sudo yunohost app setting letsencrypt unprotected_regex -v \""+regexList+"\""
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
         process.wait()
 
             # Update SSOwat conf
 
-        command = "yunohost app ssowatconf"
+        command = "sudo yunohost app ssowatconf"
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
         process.wait()
 
-    # Make sure the tmp / webroot folder exists
-    # -----------------------------------
-    
-    if os.path.exists(tmpFolder) :
-        
-        logger.info("Webroot folder already exists, skipping.")
-
-    else :
-        
-        makeDir(tmpFolder, "root", "www-data", 0650);
-
 ###############################################################################
 
-def prepareCertificateSigningRequest(domain) :
+def prepareCertificateSigningRequest(domain, keyFile, outputFolder) :
         
     # Init a request
     csr = crypto.X509Req()
@@ -328,7 +389,7 @@ def prepareCertificateSigningRequest(domain) :
     csr.get_subject().CN = domain
     
     # Set the key
-    with open(confFolder+"/keys/"+domain+".pem", 'rt') as f :
+    with open(keyFile, 'rt') as f :
         key = crypto.load_privatekey(crypto.FILETYPE_PEM, f.read())
     csr.set_pubkey(key)
     
@@ -336,7 +397,7 @@ def prepareCertificateSigningRequest(domain) :
     csr.sign(key, "sha256")
     
     # Save the request in tmp folder
-    csrFile = tmpFolder+domain+".csr"
+    csrFile = outputFolder+domain+".csr"
     logger.info("Saving to "+csrFile+" .")
     with open(csrFile, "w") as f :
         f.write(crypto.dump_certificate_request(crypto.FILETYPE_PEM, csr))
@@ -383,7 +444,7 @@ def getNginxDomainsList() :
 
 def checkNginxConfiguration() :
 
-    command = "nginx -t"
+    command = "sudo nginx -t"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
     process.wait()
 
@@ -395,23 +456,17 @@ def checkNginxConfiguration() :
 
 ###############################################################################
 
-def addKey(name) :
+def addKey(name, outputFolder) :
 
-    keyFile = confFolder+"/keys/"+name+".pem"
+    keyFile = outputFolder+"/"+name+".pem"
 
-    if os.path.exists(keyFile) :
-        
-        logger.info("Private key for "+name+" already exists, skipping.")
+    k = crypto.PKey()
+    logger.info("Generating private "+name+" key ...")
+    k.generate_key(crypto.TYPE_RSA, 2048)
 
-    else :
-
-        k = crypto.PKey()
-        logger.info("Generating private "+name+" key ...")
-        k.generate_key(crypto.TYPE_RSA, 2048)
-
-        logger.info("Saving key.")
-        with open(keyFile, "w") as f :
-            f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, k))
+    logger.info("Saving key.")
+    with open(keyFile, "w") as f :
+        f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, k))
 
 ###############################################################################
 
@@ -439,12 +494,25 @@ def validateDomain(domain) :
 
 def makeDir(path, user, group, permissions) :
 
+    if os.path.exists(path) :
+        logger.info("Folder "+path+" already exists, skipping creation.")
+    else :
+        os.makedirs(path);
+
     uid = pwd.getpwnam(user).pw_uid
     gid = grp.getgrnam(group).gr_gid
         
-    os.makedirs(path);
     os.chown(path, uid, gid)
     os.chmod(path, permissions)
+
+###############################################################################
+
+def service(theService, whatDo) :
+
+    command = "sudo service "+theService+" "+whatDo
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+    process.wait()
+
 
 ###############################################################################
 
