@@ -1,7 +1,7 @@
 #!/usr/bin/python2.7
 # -*- coding: utf-8 -*-
 
-import os, pwd, grp, logging, requests, glob, subprocess, shutil
+import sys, os, pwd, grp, logging, requests, glob, subprocess, shutil
 from datetime import datetime
 from OpenSSL  import crypto
 from optparse import OptionParser
@@ -66,11 +66,57 @@ def main() :
         # Install
         # ============
         
-        if (options.install) :
-            
-            domain = options.install
-            install(domain)
+        if ((options.installAll) or (options.install)) :
+       
+            if (options.install) :
+                domainsToInstall = [options.install]
+            else :
+                domainsToRenew = getNginxDomainsList()
 
+            for domain in domainsToInstall :
+                
+                try :
+                    install(domain, options.force)
+
+                except Exception as e :
+                    
+                    logger.error(str(e))
+                    logger.error("-----------------------------------")
+                    logger.error("Installation for "+domain+" failed!")
+                    logger.error("-----------------------------------")
+                    
+        # ============
+        # Renew
+        # ============
+        
+        if ((options.renewAll) or (options.renew)) :
+         
+            if (options.renew) :
+                domainsToRenew = [options.renew]
+            else :
+                domainsToRenew = []
+
+                for domain in getNginxDomainsList() :
+
+                    issuer = getStatus(domain)[2]
+                    if (issuer.startswith("Let's Encrypt")) :
+                        domainsToRenew.append(domain)
+
+                print domainsToRenew
+                return
+
+            for domain in domainsToRenew :
+                
+                try :
+                    renew(domain, options.force)
+
+                except Exception as e :
+                    
+                    logger.error(str(e))
+                    logger.error("-------------------------------")
+                    logger.error("Renewing for "+domain+" failed!")
+                    logger.error("-------------------------------")
+                
     except Exception as e :
 
         logger.error(str(e))
@@ -192,8 +238,12 @@ def getStatus(domain) :
 
 ###############################################################################
 
-def install(domain) :
+def install(domain, force) :
 
+    print("===========================================================")
+    print("Attempting to install certificate for domain "+domain+" ...")
+    print("===========================================================")
+    
     # Check that it makes sense to install a LE cert on this domain
 
     validateDomain(domain)
@@ -201,8 +251,11 @@ def install(domain) :
     status        = getStatus(domain)
     statusSummary = status[1]
     issuer        = status[2]
-    if (issuer.startswith("Let's Encrypt")) :
-        raise Exception("This domain seems to already have a valid Let's Encrypt certificate?")
+    
+    if (not force) and (not issuer.startswith("Let's Encrypt")) and (statusSummary != "OK") :
+        logger.warning("Domain "+domain+" seems to already have a valid certificate, ignoring.")
+        logger.warning("(Use --force to bypass.)")
+        return
 
     # Backup existing certificate
 
@@ -219,6 +272,43 @@ def install(domain) :
     configureNginxAndSsowatForAcmeChallenge(domain)
 
     fetchAndEnableNewCertificate(domain)
+    
+    print("=================================================")
+    print("Certificate for "+domain+" successfully installed")
+    print("=================================================")
+
+###############################################################################
+
+def renew(domain, force) :
+
+    print("=========================================================")
+    print("Attempting to renew certificate for domain "+domain+" ...")
+    print("=========================================================")
+    
+    # Check that it makes sense to renew the cert for this domain
+
+    validateDomain(domain)
+
+    status        = getStatus(domain)
+    statusSummary = status[1]
+    issuer        = status[2]
+    validity      = status[3]
+
+    # FIXME : Remove Fake LE after dev is done
+    if (not issuer.startswith("Let's Encrypt")) and (not issuer.startswith("Fake LE")) :
+        logger.warning("Domain "+domain+" does not have a Let's Encrypt certificate, ignoring.")
+        return
+
+    if (not force) and (validity > validityLimit) :
+        logger.warning("Certificate for "+domain+" is still valid for "+str(validity)+" days, skipping.")
+        logger.warning("Use --force to bypass the "+str(validityLimit)+" days validity threshold.)")
+        return
+
+    fetchAndEnableNewCertificate(domain)
+
+    print("===============================================")
+    print("Certificate for "+domain+" successfully renewed")
+    print("===============================================")
 
 ###############################################################################
 
@@ -285,10 +375,9 @@ def fetchAndEnableNewCertificate(domain) :
         # If not, we delete it (should have been backuped during install())
         # and make it point to the live folder
         shutil.rmtree(yunohostCertFolderDomain) 
-    
         os.symlink(liveLink, yunohostCertFolderDomain)
 
-    # Check the statusof the certificate is now "GOOD"
+    # Check the status of the certificate is now "GOOD"
     status        = getStatus(domain)
     statusSummary = status[1]
     if (statusSummary != "GOOD") :
