@@ -32,7 +32,7 @@ validityLimit       = 15
 logger = logging.getLogger(__name__)
 
 def main() :
-    
+
     init()
 
     # Start logger
@@ -43,7 +43,7 @@ def main() :
 
         # Let's see what the user wants
         options = parseOptions()
-    
+
         # ============
         # Status check
         # ============
@@ -59,38 +59,49 @@ def main() :
             status = []
             for domain in domainsToCheck :
                 status.append(getStatus(domain))
-           
+
             print(tabulate(status, headers=headers, tablefmt="simple", stralign="center"))
 
         # ============
         # Install
         # ============
-        
+
         if ((options.installAll) or (options.install)) :
-       
+
             if (options.install) :
                 domainsToInstall = [options.install]
             else :
-                domainsToRenew = getNginxDomainsList()
+
+                domainsToInstall = []
+
+                for domain in getNginxDomainsList() :
+
+                    status        = getStatus(domain)
+                    statusSummary = status[1]
+                    issuer        = status[2]
+
+                    # FIXME : remove Fake LE after dev
+                    if (not issuer.startswith("Let's Encrypt")) and (not issuer.startswith("Fake LE")) and (statusSummary != "OK") :
+                        domainsToInstall.append(domain)
 
             for domain in domainsToInstall :
-                
+
                 try :
                     install(domain, options.force)
 
                 except Exception as e :
-                    
+
                     logger.error(str(e))
                     logger.error("-----------------------------------")
                     logger.error("Installation for "+domain+" failed!")
                     logger.error("-----------------------------------")
-                    
+
         # ============
         # Renew
         # ============
-        
+
         if ((options.renewAll) or (options.renew)) :
-         
+
             if (options.renew) :
                 domainsToRenew = [options.renew]
             else :
@@ -102,21 +113,18 @@ def main() :
                     if (issuer.startswith("Let's Encrypt")) :
                         domainsToRenew.append(domain)
 
-                print domainsToRenew
-                return
-
             for domain in domainsToRenew :
-                
+
                 try :
                     renew(domain, options.force)
 
                 except Exception as e :
-                    
+
                     logger.error(str(e))
                     logger.error("-------------------------------")
                     logger.error("Renewing for "+domain+" failed!")
                     logger.error("-------------------------------")
-                
+
     except Exception as e :
 
         logger.error(str(e))
@@ -188,14 +196,14 @@ def parseOptions() :
 ###############################################################################
 
 def init() :
-        
+
     if not os.path.exists(confFolder):
-    
+
         print("Initial configuration and folders not there yet, creating them...")
-        
+
         rootId      = pwd.getpwnam("root").pw_uid
         metronomeId = grp.getgrnam("metronome").gr_gid
-        
+
         makeDir(confFolder,           "root", "root",      0655);
         makeDir(confFolder+"/certs/", "root", "metronome", 0650);
         makeDir(confFolder+"/keys/",  "root", "root",      0600);
@@ -203,7 +211,7 @@ def init() :
         makeDir(confFolder+"/logs/",  "root", "root",      0600);
 
         addKey("account", confFolder+"/keys/")
-        
+
         print("OK.")
 
 ###############################################################################
@@ -215,7 +223,7 @@ def getStatus(domain) :
     issuedBy = cert.get_issuer().CN
     validUpTo = datetime.strptime(cert.get_notAfter(),"%Y%m%d%H%M%SZ")
     daysRemaining = (validUpTo - datetime.now()).days
-    
+
     statusSummary = "UNKNOWN"
 
     if (daysRemaining < 0) :
@@ -224,6 +232,9 @@ def getStatus(domain) :
         statusSummary = "WARNING"
     elif (issuedBy.startswith("Let's Encrypt")) :
         statusSummary = "GOOD"
+    # FIXME : remove me after dev
+    elif (issuedBy.startswith("Fake LE")) :
+        statusSummary = "GOOD"
     else :
         # FIXME : should probably think about a better definition for this
         knownCAs = [ "StartCom" ]
@@ -231,7 +242,7 @@ def getStatus(domain) :
             if (issuedBy.startswith(CA)) :
                 statusSummary = "OK"
                 break
-    
+
     returnValue = [ domain, statusSummary, issuedBy, daysRemaining ]
 
     return returnValue
@@ -240,10 +251,6 @@ def getStatus(domain) :
 
 def install(domain, force) :
 
-    print("===========================================================")
-    print("Attempting to install certificate for domain "+domain+" ...")
-    print("===========================================================")
-    
     # Check that it makes sense to install a LE cert on this domain
 
     validateDomain(domain)
@@ -251,11 +258,23 @@ def install(domain, force) :
     status        = getStatus(domain)
     statusSummary = status[1]
     issuer        = status[2]
-    
-    if (not force) and (not issuer.startswith("Let's Encrypt")) and (statusSummary != "OK") :
+
+    if (issuer.startswith("Let's Encrypt")) :
+        logger.warning("Domain "+domain+" seems to already have a Let's Encrypt certificate, ignoring.")
+        return
+
+    if (not force) and (statusSummary == "OK") :
         logger.warning("Domain "+domain+" seems to already have a valid certificate, ignoring.")
         logger.warning("(Use --force to bypass.)")
         return
+    
+    # Ask user confirmation
+
+    confirm(" /!\ WARNING /!\ \nThis script will now attempt to install Let's Encrypt certificate for domain "+domain+ " !")
+
+    print("===========================================================")
+    print("Attempting to install certificate for domain "+domain+" ...")
+    print("===========================================================")
 
     # Backup existing certificate
 
@@ -268,23 +287,19 @@ def install(domain, force) :
     # Configure nginx and ssowat for acme challenge
 
     logger.info("Configuring Nginx and SSOWat for ACME challenge on "+domain+" ...")
-    
+
     configureNginxAndSsowatForAcmeChallenge(domain)
 
     fetchAndEnableNewCertificate(domain)
-    
-    print("=================================================")
-    print("Certificate for "+domain+" successfully installed")
-    print("=================================================")
+
+    print("===================================================")
+    print("Certificate for "+domain+" successfully installed !")
+    print("===================================================")
 
 ###############################################################################
 
 def renew(domain, force) :
 
-    print("=========================================================")
-    print("Attempting to renew certificate for domain "+domain+" ...")
-    print("=========================================================")
-    
     # Check that it makes sense to renew the cert for this domain
 
     validateDomain(domain)
@@ -300,15 +315,25 @@ def renew(domain, force) :
         return
 
     if (not force) and (validity > validityLimit) :
-        logger.warning("Certificate for "+domain+" is still valid for "+str(validity)+" days, skipping.")
-        logger.warning("Use --force to bypass the "+str(validityLimit)+" days validity threshold.)")
+        logger.info("Certificate for "+domain+" is still valid for "+str(validity)+" days, skipping.")
+        logger.info("(Use --force to bypass the "+str(validityLimit)+" days validity threshold.)")
         return
+ 
+    # Ask user confirmation
+    
+    confirm(" /!\ WARNING /!\ \nThis script will now attempt to renew certificate for domain "+domain+ " !")
 
+    # Actually renew the cert
+
+    print("=========================================================")
+    print("Attempting to renew certificate for domain "+domain+" ...")
+    print("=========================================================")
+    
     fetchAndEnableNewCertificate(domain)
 
-    print("===============================================")
-    print("Certificate for "+domain+" successfully renewed")
-    print("===============================================")
+    print("=================================================")
+    print("Certificate for "+domain+" successfully renewed !")
+    print("=================================================")
 
 ###############################################################################
 
@@ -323,10 +348,10 @@ def fetchAndEnableNewCertificate(domain) :
 
 
     logger.info("Prepare key and certificate signing request (CSR) for "+domain+"...")
-    
+
     addKey(domain, tmpFolder)
     domainKeyFile = tmpFolder+"/"+domain+".pem"
-    
+
     prepareCertificateSigningRequest(domain, domainKeyFile, tmpFolder)
 
 
@@ -341,21 +366,21 @@ def fetchAndEnableNewCertificate(domain) :
 
 
 
-    logger.info("Saving the key and signed certificate...")    
-   
+    logger.info("Saving the key and signed certificate...")
+
     # Create corresponding directory
     dateTag = datetime.now().strftime("%Y%m%d.%H%M%S")
-    newCertFolder = confFolder + "/certs/" + domain + "." + dateTag 
+    newCertFolder = confFolder + "/certs/" + domain + "." + dateTag
     makeDir(newCertFolder,     "root", "root",     0655);
-  
+
     # Move the private key
     shutil.move(domainKeyFile, newCertFolder+"/key.pem")
-   
+
     # Write the cert
     with open(newCertFolder+"/crt.pem", "w") as f :
         f.write(signedCertificate)
         f.write(LEintermediateCertificate)
-    
+
 
 
     logger.info("Enabling the new certificate...")
@@ -371,10 +396,10 @@ def fetchAndEnableNewCertificate(domain) :
     # Check the path in yunohost cert folder points to something in the yunoacme conf folder
     yunohostCertFolderDomain = yunohostCertsFolder+"/"+domain
     if not (os.path.realpath(yunohostCertFolderDomain).startswith(confFolder)) :
-        
+
         # If not, we delete it (should have been backuped during install())
         # and make it point to the live folder
-        shutil.rmtree(yunohostCertFolderDomain) 
+        shutil.rmtree(yunohostCertFolderDomain)
         os.symlink(liveLink, yunohostCertFolderDomain)
 
     # Check the status of the certificate is now "GOOD"
@@ -391,11 +416,28 @@ def fetchAndEnableNewCertificate(domain) :
 
         service(s, "restart")
 
-        
+
 
 
 ###############################################################################
 #   Misc tools                                                                #
+###############################################################################
+
+def confirm(message) :
+
+    print(message)
+
+    try :
+
+        r = raw_input("Is this what you want (type 'yes', or use Ctrl+C to abort) ? ").lower()
+        while (r != 'yes') :
+            r = raw_input("Please either type 'yes', or use Ctrl+C. ").lower()
+
+    except KeyboardInterrupt:
+
+        print("\nAborting.")
+        sys.exit()
+
 ###############################################################################
 
 # FIXME : probably split this in several functions
@@ -407,7 +449,7 @@ def configureNginxAndSsowatForAcmeChallenge(domain) :
     nginxConfFile = "/etc/nginx/conf.d/"+domain+".d/000-acmechallenge.conf"
 
     nginxConfiguration = '''
-location '/.well-known/acme-challenge' 
+location '/.well-known/acme-challenge'
 {
         default_type "text/plain";
         alias        '''+webrootFolder+''';
@@ -421,19 +463,19 @@ location '/.well-known/acme-challenge'
 
     # Write the conf
     if os.path.exists(nginxConfFile) :
-        
+
         logger.info("Nginx configuration file for ACME challenge already exists for domain, skipping.")
-       
+
     else :
-        
+
         logger.info("Adding Nginx configuration file for Let's encrpt / Acme challenge for domain " + domain + ".")
         with open(nginxConfFile, "w") as f :
             f.write(nginxConfiguration)
-        
+
         # Check conf is okay and reload nginx if it is
         if (checkNginxConfiguration()) :
             service("nginx","reload")
-        
+
     # SSOwat part
     # -----------
 
@@ -443,20 +485,20 @@ location '/.well-known/acme-challenge'
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
     process.wait()
     regexList, err = process.communicate()
-   
+
         # Append regex for 'domain' to the current list
 
     regex = domain+"/%.well%-known/acme%-challenge/.*$"
-    
+
     if regex in regexList :
-    
+
         logger.info("Let's encrypt / Acme challenge SSOWat configuration already in place, skipping.")
-    
+
     else :
         logger.info("Adding SSOWat configuration for Let's encrypt / ACME challenge for domain " + domain + ".")
 
         regexList += ","+regex
-        
+
         command = "sudo yunohost app setting letsencrypt unprotected_regex -v \""+regexList+"\""
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
         process.wait()
@@ -470,21 +512,21 @@ location '/.well-known/acme-challenge'
 ###############################################################################
 
 def prepareCertificateSigningRequest(domain, keyFile, outputFolder) :
-        
+
     # Init a request
     csr = crypto.X509Req()
-    
+
     # Set the domain
     csr.get_subject().CN = domain
-    
+
     # Set the key
     with open(keyFile, 'rt') as f :
         key = crypto.load_privatekey(crypto.FILETYPE_PEM, f.read())
     csr.set_pubkey(key)
-    
+
     # Sign the request
     csr.sign(key, "sha256")
-    
+
     # Save the request in tmp folder
     csrFile = outputFolder+domain+".csr"
     logger.info("Saving to "+csrFile+" .")
@@ -493,13 +535,13 @@ def prepareCertificateSigningRequest(domain, keyFile, outputFolder) :
 
 ###############################################################################
 
-def initLogger(level=logging.DEBUG) :
+def initLogger(level=logging.INFO) :
 
     # Name, format and level
     formatter = logging.Formatter('[%(levelname)s] %(asctime)s : %(message)s',
             datefmt='%d/%m/%y %H:%M:%S')
     logger.setLevel(level)
-    
+
     # Logging to a file
     fileHandler = logging.FileHandler(confFolder+"/logs/logs")
     fileHandler.setFormatter(formatter)
@@ -508,12 +550,12 @@ def initLogger(level=logging.DEBUG) :
     # Logging to stdout / stderr
     streamHandler = logging.StreamHandler()
     streamHandler.setFormatter(formatter)
-    logger.addHandler(streamHandler)    
+    logger.addHandler(streamHandler)
 
 ###############################################################################
 
 def getNginxDomainsList() :
-    
+
     g = glob.glob("/etc/nginx/conf.d/*.conf")
 
     domainList = []
@@ -561,7 +603,7 @@ def addKey(name, outputFolder) :
 
 def validateDomain(domain) :
 
-    logger.info("Attempting to validate domain "+domain+" ...")
+    logger.debug("Attempting to validate domain "+domain+" ...")
 
     # Check domain is configured in yunohost ?
     if (domain not in getNginxDomainsList()) :
@@ -571,14 +613,14 @@ def validateDomain(domain) :
     try :
 
         requests.head("http://"+domain)
-        logger.info("Domain "+domain+" seems good to work with !")
+        logger.debug("Domain "+domain+" seems good to work with !")
         return True
 
     except Exception:
 
         raise Exception("It seems that domain "+domain+" cannot be accessed on port 80? Please check your configuration.")
         return False
- 
+
 ###############################################################################
 
 def makeDir(path, user, group, permissions) :
@@ -590,7 +632,7 @@ def makeDir(path, user, group, permissions) :
 
     uid = pwd.getpwnam(user).pw_uid
     gid = grp.getgrnam(group).gr_gid
-        
+
     os.chown(path, uid, gid)
     os.chmod(path, permissions)
 
