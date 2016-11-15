@@ -564,7 +564,7 @@ def getNginxDomainsList() :
 
         domain = os.path.basename(path)[:-5]
 
-        if (domain == "yunohost_admin") or (domain == "ssowat") :
+        if (domain == "yunohost_admin") or (domain == "ssowat") or (domain == "global") :
             continue
 
         domainList.append(domain)
